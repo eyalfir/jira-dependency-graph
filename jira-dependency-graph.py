@@ -30,7 +30,7 @@ class JiraSearch(object):
     def __init__(self, url, auth):
         self.url = url + '/rest/api/latest'
         self.auth = auth
-        self.fields = ','.join(['key', 'summary', 'assignee', 'status', 'description', 'issuetype', 'issuelinks', 'subtasks'])
+        self.fields = ','.join(['key', 'summary', 'assignee', 'labels', 'status', 'description', 'issuetype', 'issuelinks', 'subtasks'])
 
     def get(self, uri, params={}):
         headers = {'Content-Type' : 'application/json'}
@@ -58,21 +58,27 @@ class JiraSearch(object):
         return content['issues']
 
 
-def build_graph_data(start_issue_key, jira, excludes, show_directions, directions, includes, ignore_closed, ignore_epic):
+def build_graph_data(start_issue_key, jira, excludes, show_directions, directions, includes, ignore_closed, ignore_epic, jq=None):
     """ Given a starting image key and the issue-fetching function build up the GraphViz data representing relationships
         between issues. This will consider both subtasks and issue links.
     """
     def get_key(issue):
         return issue['key']
 
-    def create_node_text(issue_key, summary):
+    def create_node_text(issue_key, fields):
         # truncate long labels with "...", but only if the three dots are
         # replacing more than two characters -- otherwise the truncated
         # label would be taking more space than the original.
+        summary = fields['summary']
         if len(summary) > MAX_SUMMARY_LENGTH+2:
             summary = summary[:MAX_SUMMARY_LENGTH] + '...'
-        summary = summary.replace('"', '\\"')
-        return '"{}({})"'.format(issue_key, summary)
+        short_summary = summary.replace('"', '\\"')
+        if not jq:
+            return '"{}({})"'.format(issue_key, short_summary)
+        else:
+            import pyjq
+            return str(pyjq.one(jq, fields, vars=dict(issue_key=issue_key)))
+            #'"{}({})\n{}\n{}"'.format(issue_key, short_summary, fields['assignee']['displayName'], fields['labels'])
 
     def process_link(fields, issue_key, link):
         if link.has_key('outwardIssue'):
@@ -85,8 +91,8 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
         if direction not in directions:
             return
 
-        linked_issue = link[direction + 'Issue']
-        linked_issue_key = get_key(linked_issue)
+        linked_issue_key = get_key(link[direction + 'Issue'])
+        linked_issue = jira.get_issue(linked_issue_key)
         link_type = link['type'][direction]
 
         if ignore_closed:
@@ -120,8 +126,8 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
         else:
             log ("Linked issue summary  " + linked_issue['fields']['summary'])
             node = '{}->{}[label="{}"{}]'.format (
-                create_node_text(issue_key, fields['summary']), 
-                create_node_text(linked_issue_key, linked_issue['fields']['summary']), 
+                create_node_text(issue_key, fields), 
+                create_node_text(linked_issue_key, linked_issue['fields']), 
                 link_type, extra)
 
 
@@ -142,7 +148,7 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
             if issue['fields']['status']['name'] in 'Closed':
                 return graph
 
-        graph.append(create_node_text(issue_key, fields['summary']))
+        graph.append(create_node_text(issue_key, fields))
 
         if fields['issuetype']['name'] == 'Epic' and not ignore_epic:
             issues = jira.query('"Epic Link" = "%s"' % issue_key)
@@ -150,8 +156,8 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
                 subtask_key = get_key(subtask)
                 log(subtask_key + ' => references epic => ' + issue_key)
                 node = '{}->{}[color=orange]'.format(
-                    create_node_text(issue_key, fields['summary']), 
-                    create_node_text(subtask_key, subtask['fields']['summary']) )
+                    create_node_text(issue_key, fields), 
+                    create_node_text(subtask_key, subtask['fields']) )
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('subtasks'):
@@ -159,8 +165,8 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
                 subtask_key = get_key(subtask)
                 log(issue_key + ' => has subtask => ' + subtask_key)
                 node = '{}->{}[color=blue][label="subtask"]'.format (
-                        create_node_text(issue_key, fields['summary']), 
-                        create_node_text(subtask_key, subtask['fields']['summary']))
+                        create_node_text(issue_key, fields), 
+                        create_node_text(subtask_key, subtask['fields']))
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('issuelinks'):
@@ -215,6 +221,7 @@ def parse_args():
     parser.add_argument('-x', '--exclude-link', dest='excludes', default=[], action='append', help='Exclude link type(s)')
     parser.add_argument('--ignore-closed', dest='closed', action='store_true', default=False, help='Ignore closed issues')
     parser.add_argument('-i', '--issue-include', dest='includes', default='', help='Include issue keys')
+    parser.add_argument('-F', '--format', dest='jq', default='', help='Use this jq pattern to format nodes')
     parser.add_argument('-s', '--show-directions', dest='show_directions', default=['inward', 'outward'], help='which directions to show (inward,outward)')
     parser.add_argument('-d', '--directions', dest='directions', default=['inward', 'outward'], help='which directions to walk (inward,outward)')
     parser.add_argument('issues', nargs='+', help='The issue key (e.g. JRADEV-1107, JRADEV-1391)')
@@ -246,7 +253,7 @@ def main():
 
     graph = []
     for issue in options.issues:
-        graph = graph + build_graph_data(issue, jira, options.excludes, options.show_directions, options.directions, options.includes, options.closed, options.ignore_epic)
+        graph = graph + build_graph_data(issue, jira, options.excludes, options.show_directions, options.directions, options.includes, options.closed, options.ignore_epic, jq=options.jq)
 
     if options.local:
         print_graph(filter_duplicates(graph))
