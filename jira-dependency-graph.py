@@ -58,14 +58,14 @@ class JiraSearch(object):
         return content['issues']
 
 
-def build_graph_data(start_issue_key, jira, excludes, show_directions, directions, includes, ignore_closed, ignore_epic, jq=None):
+def build_graph_data(start_issue_key, jira, excludes, show_directions, directions, includes, ignore_closed, ignore_epic, jq=None, extra_jq=None):
     """ Given a starting image key and the issue-fetching function build up the GraphViz data representing relationships
         between issues. This will consider both subtasks and issue links.
     """
     def get_key(issue):
         return issue['key']
 
-    def create_node_text(issue_key, fields):
+    def create_node_label(issue_key, fields):
         # truncate long labels with "...", but only if the three dots are
         # replacing more than two characters -- otherwise the truncated
         # label would be taking more space than the original.
@@ -74,11 +74,17 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
             summary = summary[:MAX_SUMMARY_LENGTH] + '...'
         short_summary = summary.replace('"', '\\"')
         if not jq:
-            return '"{}({})"'.format(issue_key, short_summary)
+            return '{} ({})'.format(issue_key, short_summary)
         else:
             import pyjq
-            return str(pyjq.one(jq, fields, vars=dict(issue_key=issue_key)))
-            #'"{}({})\n{}\n{}"'.format(issue_key, short_summary, fields['assignee']['displayName'], fields['labels'])
+            try:
+                return str(pyjq.one(jq, fields, vars=dict(issue_key=issue_key)))
+                #'"{}({})\n{}\n{}"'.format(issue_key, short_summary, fields['assignee']['displayName'], fields['labels'])
+            except Exception:
+                log('Error with issue %s' % issue_key)
+                print(fields)
+                raise
+
 
     def process_link(fields, issue_key, link):
         if link.has_key('outwardIssue'):
@@ -92,7 +98,6 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
             return
 
         linked_issue_key = get_key(link[direction + 'Issue'])
-        linked_issue = jira.get_issue(linked_issue_key)
         link_type = link['type'][direction]
 
         if ignore_closed:
@@ -124,17 +129,23 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
         if direction not in show_directions:
             node = None
         else:
-            log ("Linked issue summary  " + linked_issue['fields']['summary'])
-            node = '{}->{}[label="{}"{}]'.format (
-                create_node_text(issue_key, fields), 
-                create_node_text(linked_issue_key, linked_issue['fields']), 
-                link_type, extra)
+            log ("Linked issue " + linked_issue_key)
+            node = '"{}"->"{}"[label="{}"{}]'.format(issue_key, linked_issue_key, link_type, extra)
 
 
         return linked_issue_key, node
 
     # since the graph can be cyclic we need to prevent infinite recursion
     seen = []
+
+    def create_node_extra(issue_key, fields):
+        import pyjq
+        try:
+            return pyjq.one(extra_jq, fields, vars=dict(issue_key=issue_key))
+        except Exception:
+            log('Problem with extra for issue %s' % issue_key)
+            print (fields)
+            raise
 
     def walk(issue_key, graph):
         """ issue is the JSON representation of the issue """
@@ -148,25 +159,23 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
             if issue['fields']['status']['name'] in 'Closed':
                 return graph
 
-        graph.append(create_node_text(issue_key, fields))
+        graph.append('"{}" [label="{}"]'.format(issue_key, create_node_label(issue_key, fields)))
+        if extra_jq:
+            graph.append('"{}" [{}]'.format(issue_key, create_node_extra(issue_key, fields)))
 
         if fields['issuetype']['name'] == 'Epic' and not ignore_epic:
             issues = jira.query('"Epic Link" = "%s"' % issue_key)
             for subtask in issues:
                 subtask_key = get_key(subtask)
                 log(subtask_key + ' => references epic => ' + issue_key)
-                node = '{}->{}[color=orange]'.format(
-                    create_node_text(issue_key, fields), 
-                    create_node_text(subtask_key, subtask['fields']) )
+                node = '{}->{}[color=orange]'.format(issue_key, subtask_key)
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('subtasks'):
             for subtask in fields['subtasks']:
                 subtask_key = get_key(subtask)
                 log(issue_key + ' => has subtask => ' + subtask_key)
-                node = '{}->{}[color=blue][label="subtask"]'.format (
-                        create_node_text(issue_key, fields), 
-                        create_node_text(subtask_key, subtask['fields']))
+                node = '{}->{}[color=blue][label="subtask"]'.format(issue_key, subtask_key)
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('issuelinks'):
@@ -206,7 +215,7 @@ def create_graph_image(graph_data, image_file):
 
 
 def print_graph(graph_data):
-    print('digraph{%s}' % ';'.join(graph_data))
+    print('digraph{%s}' % ';\n'.join(graph_data))
 
 
 def parse_args():
@@ -221,7 +230,8 @@ def parse_args():
     parser.add_argument('-x', '--exclude-link', dest='excludes', default=[], action='append', help='Exclude link type(s)')
     parser.add_argument('--ignore-closed', dest='closed', action='store_true', default=False, help='Ignore closed issues')
     parser.add_argument('-i', '--issue-include', dest='includes', default='', help='Include issue keys')
-    parser.add_argument('-F', '--format', dest='jq', default='', help='Use this jq pattern to format nodes')
+    parser.add_argument('-F', '--format', dest='jq', default='', help='Use this jq pattern to format nodes labels')
+    parser.add_argument('-N', '--node-format', dest='extra_jq', default='', help='Use this jq pattern to format nodes')
     parser.add_argument('-s', '--show-directions', dest='show_directions', default=['inward', 'outward'], help='which directions to show (inward,outward)')
     parser.add_argument('-d', '--directions', dest='directions', default=['inward', 'outward'], help='which directions to walk (inward,outward)')
     parser.add_argument('issues', nargs='+', help='The issue key (e.g. JRADEV-1107, JRADEV-1391)')
@@ -253,7 +263,7 @@ def main():
 
     graph = []
     for issue in options.issues:
-        graph = graph + build_graph_data(issue, jira, options.excludes, options.show_directions, options.directions, options.includes, options.closed, options.ignore_epic, jq=options.jq)
+        graph = graph + build_graph_data(issue, jira, options.excludes, options.show_directions, options.directions, options.includes, options.closed, options.ignore_epic, jq=options.jq, extra_jq=options.extra_jq)
 
     if options.local:
         print_graph(filter_duplicates(graph))
