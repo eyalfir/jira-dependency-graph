@@ -168,14 +168,14 @@ def build_graph_data(start_issue_key, jira, excludes, show_directions, direction
             for subtask in issues:
                 subtask_key = get_key(subtask)
                 log(subtask_key + ' => references epic => ' + issue_key)
-                node = '{}->{}[color=orange]'.format(issue_key, subtask_key)
+                node = '"{}"->"{}"[color=orange]'.format(issue_key, subtask_key)
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('subtasks'):
             for subtask in fields['subtasks']:
                 subtask_key = get_key(subtask)
                 log(issue_key + ' => has subtask => ' + subtask_key)
-                node = '{}->{}[color=blue][label="subtask"]'.format(issue_key, subtask_key)
+                node = '"{}"->"{}"[color=blue][label="subtask"]'.format(issue_key, subtask_key)
                 graph.append(node)
                 children.append(subtask_key)
         if fields.has_key('issuelinks'):
